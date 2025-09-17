@@ -8,6 +8,7 @@ class Employee(Base):
     email = Column(Text, unique=True, nullable=False)
     name = Column(Text, nullable=False)
     total_leaves = Column(Integer, nullable=False, default=22)
+    connected_account_id = Column(Text, nullable=True)
 
     leave_applications = relationship("LeaveApplication", back_populates="employee")
 

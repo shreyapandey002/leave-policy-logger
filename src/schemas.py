@@ -11,6 +11,7 @@ class LeaveRequest(BaseModel):
     end_date: datetime
     days: int
     description: str
+    connected_account_id: Optional[str] = None
 
     @field_validator("start_date", "end_date", mode="before")
     def parse_date(cls, value):
