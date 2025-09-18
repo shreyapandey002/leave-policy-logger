@@ -1,8 +1,8 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 from src.db import SessionLocal, engine
 from src import models, crud, schemas
-from sqlalchemy import func
 
 app = FastAPI()
 
@@ -15,6 +15,7 @@ def get_db():
     finally:
         db.close()
 
+
 @app.post("/leaves", response_model=schemas.LeaveResponse)
 def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
     # 1. Check if employee exists
@@ -23,22 +24,20 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         employee = models.Employee(
             name=request.name,
             email=request.email,
-            connected_account_id=request.connected_account_id  
+            connected_account_id=request.connected_account_id
         )
         db.add(employee)
         db.commit()
         db.refresh(employee)
 
-    # 2. Calculate leaves already taken
+    # 2. Calculate leaves left
     total_taken = db.query(models.LeaveApplication).filter(
         models.LeaveApplication.employee_id == employee.id
     ).with_entities(func.sum(models.LeaveApplication.days)).scalar() or 0
-
     leaves_left = employee.total_leaves - total_taken
 
-    # 3. Check if request exceeds balance
+    # 3. Reject if requested days exceed balance
     if request.days > leaves_left:
-        # Escalate instead of deducting
         return schemas.LeaveResponse(
             name=employee.name,
             email=employee.email,
@@ -47,14 +46,10 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
             days=request.days,
             description=request.description,
             leaves_left=leaves_left,
-            status="pending_hr_approval",   # <-- NEW FIELD
-            message=(
-                f"Requested {request.days} days but only {leaves_left} available. "
-                f"Escalated to HR for approval. No deduction applied."
-            )
+            status="rejected"
         )
 
-    # 4. Normal flow → deduct and save leave application
+    # 4. Save leave if valid
     leave = crud.apply_leave(
         db=db,
         employee_id=employee.id,
@@ -64,13 +59,8 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         description=request.description
     )
 
-    # 5. Recalculate balance after deduction
-    total_taken = db.query(models.LeaveApplication).filter(
-        models.LeaveApplication.employee_id == employee.id
-    ).with_entities(func.sum(models.LeaveApplication.days)).scalar() or 0
-    leaves_left = employee.total_leaves - total_taken
+    leaves_left -= request.days
 
-    # 6. Return success response
     return schemas.LeaveResponse(
         name=employee.name,
         email=employee.email,
@@ -78,5 +68,6 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         end_date=leave.end_date,
         days=leave.days,
         description=leave.description,
-        leaves_left=leaves_left
+        leaves_left=leaves_left,
+        status="logged"
     )
