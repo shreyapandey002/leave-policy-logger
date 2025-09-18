@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from src.db import SessionLocal, engine
 from src import models, crud, schemas
@@ -23,13 +23,38 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         employee = models.Employee(
             name=request.name,
             email=request.email,
-            connected_account_id=request.connected_account_id  # <-- NEW FIELD
+            connected_account_id=request.connected_account_id  
         )
         db.add(employee)
         db.commit()
         db.refresh(employee)
 
-    # 2. Apply leave
+    # 2. Calculate leaves already taken
+    total_taken = db.query(models.LeaveApplication).filter(
+        models.LeaveApplication.employee_id == employee.id
+    ).with_entities(func.sum(models.LeaveApplication.days)).scalar() or 0
+
+    leaves_left = employee.total_leaves - total_taken
+
+    # 3. Check if request exceeds balance
+    if request.days > leaves_left:
+        # Escalate instead of deducting
+        return schemas.LeaveResponse(
+            name=employee.name,
+            email=employee.email,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            days=request.days,
+            description=request.description,
+            leaves_left=leaves_left,
+            status="pending_hr_approval",   # <-- NEW FIELD
+            message=(
+                f"Requested {request.days} days but only {leaves_left} available. "
+                f"Escalated to HR for approval. No deduction applied."
+            )
+        )
+
+    # 4. Normal flow → deduct and save leave application
     leave = crud.apply_leave(
         db=db,
         employee_id=employee.id,
@@ -39,13 +64,13 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         description=request.description
     )
 
-    # 3. Calculate leaves left
+    # 5. Recalculate balance after deduction
     total_taken = db.query(models.LeaveApplication).filter(
         models.LeaveApplication.employee_id == employee.id
     ).with_entities(func.sum(models.LeaveApplication.days)).scalar() or 0
     leaves_left = employee.total_leaves - total_taken
 
-    # 4. Return response
+    # 6. Return success response
     return schemas.LeaveResponse(
         name=employee.name,
         email=employee.email,
