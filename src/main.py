@@ -5,7 +5,6 @@ from src.db import SessionLocal, engine
 from src import models, crud, schemas
 
 app = FastAPI()
-
 models.Base.metadata.create_all(bind=engine)
 
 def get_db():
@@ -23,8 +22,7 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
     if not employee:
         employee = models.Employee(
             name=request.name,
-            email=request.email,
-            connected_account_id=request.connected_account_id
+            email=request.email
         )
         db.add(employee)
         db.commit()
