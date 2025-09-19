@@ -66,7 +66,7 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(employee)
 
-    # 2. Calculate leaves left
+    # 2. Calculate leaves left (based on all leaves taken so far)
     total_taken = db.query(models.LeaveApplication).filter(
         models.LeaveApplication.employee_id == employee.id
     ).with_entities(func.sum(models.LeaveApplication.days)).scalar() or 0
@@ -82,10 +82,11 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
             days=request.days,
             description=request.description,
             leaves_left=leaves_left,
-            status="rejected"
+            status="rejected",   # returned only in response
+            email_status={"status": "skipped"}
         )
 
-    # 4. Save leave if valid
+    # 4. Save leave (no status column)
     leave = crud.apply_leave(
         db=db,
         employee_id=employee.id,
@@ -95,10 +96,8 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         description=request.description
     )
 
-    leaves_left -= request.days
-
     # 5. Send email notification
-    email_subject = f"Leave Application Logged: {employee.name}"
+    email_subject = f"New Leave Application: {employee.name}"
     email_body = (
         f"Name: {employee.name}\n"
         f"Email: {employee.email}\n"
@@ -106,7 +105,7 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         f"End Date: {leave.end_date.date()}\n"
         f"Days: {leave.days}\n"
         f"Description: {leave.description}\n"
-        f"Leaves Left: {leaves_left}"
+        f"Leaves Left (after request): {leaves_left - leave.days}"
     )
     email_status = send_leave_email(HR_EMAIL, email_subject, email_body)
 
@@ -117,7 +116,7 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         "end_date": leave.end_date,
         "days": leave.days,
         "description": leave.description,
-        "leaves_left": leaves_left,
-        "status": "logged",
+        "leaves_left": leaves_left - leave.days,  # updated balance
+        "status": "logged",  # only in response, not stored
         "email_status": email_status
     }
