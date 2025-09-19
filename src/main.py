@@ -35,6 +35,10 @@ def get_db():
 # MAILTRAP HELPER
 # -------------------------
 def send_leave_email(to_email: str, subject: str, body: str):
+    """
+    Send an email using Mailtrap (SMTP).
+    This function returns status info but we won't include it in the API response.
+    """
     msg = MIMEMultipart()
     msg['From'] = MAILTRAP_USER
     msg['To'] = to_email
@@ -55,7 +59,15 @@ def send_leave_email(to_email: str, subject: str, body: str):
 # -------------------------
 @app.post("/leaves", response_model=schemas.LeaveResponse)
 def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
-    # 1. Check if employee exists
+    """
+    Behavior:
+    - Compute leaves_left based on existing DB entries (before applying this request).
+    - If request.days > leaves_left_before -> return rejected (no DB insert).
+    - Otherwise, insert the leave request into DB (recording it).
+    - Send an email notification to HR (send result is not returned in API response).
+    - Return leaves_left as the balance BEFORE the current request (i.e. request days are NOT deducted).
+    """
+    # 1. Ensure employee exists (create if missing)
     employee = db.query(models.Employee).filter(models.Employee.email == request.email).first()
     if not employee:
         employee = models.Employee(
@@ -66,14 +78,17 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(employee)
 
-    # 2. Calculate leaves left (based on all leaves taken so far)
+    # 2. Calculate leaves left BEFORE processing this new request.
+    #    (sum of all existing leave rows)
     total_taken = db.query(models.LeaveApplication).filter(
         models.LeaveApplication.employee_id == employee.id
     ).with_entities(func.sum(models.LeaveApplication.days)).scalar() or 0
-    leaves_left = employee.total_leaves - total_taken
 
-    # 3. Reject if requested days exceed balance
-    if request.days > leaves_left:
+    leaves_left_before = employee.total_leaves - total_taken
+
+    # 3. Reject if requested days exceed the pre-request balance
+    if request.days > leaves_left_before:
+        # Return "rejected" with leaves_left as the BEFORE-request value
         return schemas.LeaveResponse(
             name=employee.name,
             email=employee.email,
@@ -81,12 +96,11 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
             end_date=request.end_date,
             days=request.days,
             description=request.description,
-            leaves_left=leaves_left,
-            status="rejected",   # returned only in response
-            email_status={"status": "skipped"}
+            leaves_left=leaves_left_before,
+            status="rejected"
         )
 
-    # 4. Save leave (no status column)
+    # 4. Save leave (we record the leave in DB, but we DO NOT change the returned leaves_left)
     leave = crud.apply_leave(
         db=db,
         employee_id=employee.id,
@@ -96,8 +110,8 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         description=request.description
     )
 
-    # 5. Send email notification
-    email_subject = f"New Leave Application: {employee.name}"
+    # 5. Send email notification to HR (we ignore/send but don't expose this status in API response)
+    email_subject = f"Leave Application Logged: {employee.name}"
     email_body = (
         f"Name: {employee.name}\n"
         f"Email: {employee.email}\n"
@@ -105,18 +119,23 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         f"End Date: {leave.end_date.date()}\n"
         f"Days: {leave.days}\n"
         f"Description: {leave.description}\n"
-        f"Leaves Left (after request): {leaves_left - leave.days}"
+        f"Leaves Left (before approval): {leaves_left_before}\n"
     )
-    email_status = send_leave_email(HR_EMAIL, email_subject, email_body)
+    # Fire-and-forget-like: capture result but do not return it in response_model
+    try:
+        _ = send_leave_email(HR_EMAIL, email_subject, email_body)
+    except Exception:
+        # swallow; don't fail the API because email failed
+        pass
 
-    return {
-        "name": employee.name,
-        "email": employee.email,
-        "start_date": leave.start_date,
-        "end_date": leave.end_date,
-        "days": leave.days,
-        "description": leave.description,
-        "leaves_left": leaves_left - leave.days,  # updated balance
-        "status": "logged",  # only in response, not stored
-        "email_status": email_status
-    }
+    # 6. Return response with leaves_left BEFORE the current request (requested days not deducted)
+    return schemas.LeaveResponse(
+        name=employee.name,
+        email=employee.email,
+        start_date=leave.start_date,
+        end_date=leave.end_date,
+        days=leave.days,
+        description=leave.description,
+        leaves_left=leaves_left_before,   # <-- important: not leaves_left_before - leave.days
+        status="logged"
+    )
