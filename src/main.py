@@ -6,7 +6,7 @@ from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from src.db import SessionLocal, engine
 from src import models, crud
-from src.schemas import LeaveDraftRequest
+from src.schemas import LeaveDraft
 # -------------------------
 # APP & DB
 # -------------------------
@@ -58,7 +58,7 @@ def send_leave_email(to_email: str, subject: str, body: str):
 # LEAVE ENDPOINT
 # -------------------------
 @app.post("/leaves")
-def apply_leave(request: schemas.LeaveDraftRequest, db: Session = Depends(get_db)):
+def apply_leave(request: schemas.LeaveDraft, db: Session = Depends(get_db)):
     """
     Step-by-step drafting:
     - Store whatever fields user has given in LeaveDraft.
