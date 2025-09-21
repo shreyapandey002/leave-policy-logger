@@ -5,8 +5,13 @@ from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from src.db import SessionLocal, engine
-from src import models, crud, schemas
-
+from src import models, crud
+from src.schemas import LeaveDraftRequest
+# -------------------------
+# APP & DB
+# -------------------------
+app = FastAPI()
+models.Base.metadata.create_all(bind=engine)
 # -------------------------
 # CONFIG
 # -------------------------
