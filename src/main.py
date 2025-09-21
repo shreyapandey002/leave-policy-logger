@@ -4,8 +4,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-
 from src.db import SessionLocal, engine
 from src import models, crud, schemas
 
@@ -24,6 +22,7 @@ HR_EMAIL = os.getenv("HR_EMAIL", "hr@example.com")
 app = FastAPI()
 models.Base.metadata.create_all(bind=engine)
 
+
 def get_db():
     db = SessionLocal()
     try:
@@ -35,15 +34,11 @@ def get_db():
 # MAILTRAP HELPER
 # -------------------------
 def send_leave_email(to_email: str, subject: str, body: str):
-    """
-    Send an email using Mailtrap (SMTP).
-    This function returns status info but we won't include it in the API response.
-    """
     msg = MIMEMultipart()
-    msg['From'] = MAILTRAP_USER
-    msg['To'] = to_email
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
+    msg["From"] = MAILTRAP_USER
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
 
     try:
         with smtplib.SMTP(MAILTRAP_HOST, MAILTRAP_PORT) as server:
@@ -57,60 +52,62 @@ def send_leave_email(to_email: str, subject: str, body: str):
 # -------------------------
 # LEAVE ENDPOINT
 # -------------------------
-@app.post("/leaves", response_model=schemas.LeaveResponse)
-def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
+@app.post("/leaves")
+def apply_leave(request: schemas.LeaveDraftRequest, db: Session = Depends(get_db)):
     """
-    Behavior:
-    - Compute leaves_left based on existing DB entries (before applying this request).
-    - If request.days > leaves_left_before -> return rejected (no DB insert).
-    - Otherwise, insert the leave request into DB (recording it).
-    - Send an email notification to HR (send result is not returned in API response).
-    - Return leaves_left as the balance BEFORE the current request (i.e. request days are NOT deducted).
+    Step-by-step drafting:
+    - Store whatever fields user has given in LeaveDraft.
+    - If all required fields are filled -> finalize, move to LeaveApplication, send email, delete draft.
+    - Otherwise -> return which fields are still missing.
     """
-    # 1. Ensure employee exists (create if missing)
-    employee = db.query(models.Employee).filter(models.Employee.email == request.email).first()
+
+    # 1. Save/Update draft
+    draft = crud.upsert_draft(db, request.dict())
+
+    # 2. Check if draft is complete
+    required_fields = ["name", "email", "start_date", "end_date", "days", "description"]
+    missing = [f for f in required_fields if getattr(draft, f) is None]
+
+    if missing:
+        return {
+            "status": "drafting",
+            "message": f"Waiting for: {missing}",
+            "current_draft": {f: getattr(draft, f) for f in required_fields},
+        }
+
+    # 3. Finalize (all fields present)
+    # Ensure employee exists
+    employee = db.query(models.Employee).filter(models.Employee.email == draft.email).first()
     if not employee:
-        employee = models.Employee(
-            name=request.name,
-            email=request.email
-        )
+        employee = models.Employee(name=draft.name, email=draft.email)
         db.add(employee)
         db.commit()
         db.refresh(employee)
 
-    # 2. Calculate leaves left BEFORE processing this new request.
-    #    (sum of all existing leave rows)
-    total_taken = db.query(models.LeaveApplication).filter(
-        models.LeaveApplication.employee_id == employee.id
-    ).with_entities(func.sum(models.LeaveApplication.days)).scalar() or 0
+    # Compute leaves left BEFORE this request
+    leaves_left_before = crud.calculate_leaves_left(db, employee.id, employee.total_leaves)
 
-    leaves_left_before = employee.total_leaves - total_taken
+    if draft.days > leaves_left_before:
+        return {
+            "status": "rejected",
+            "message": "Not enough leave balance",
+            "leaves_left": leaves_left_before,
+        }
 
-    # 3. Reject if requested days exceed the pre-request balance
-    if request.days > leaves_left_before:
-        # Return "rejected" with leaves_left as the BEFORE-request value
-        return schemas.LeaveResponse(
-            name=employee.name,
-            email=employee.email,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            days=request.days,
-            description=request.description,
-            leaves_left=leaves_left_before,
-            status="rejected"
-        )
-
-    # 4. Save leave (we record the leave in DB, but we DO NOT change the returned leaves_left)
+    # Save leave
     leave = crud.apply_leave(
         db=db,
         employee_id=employee.id,
-        start_date=request.start_date,
-        end_date=request.end_date,
-        days=request.days,
-        description=request.description
+        start_date=draft.start_date,
+        end_date=draft.end_date,
+        days=draft.days,
+        description=draft.description,
     )
 
-    # 5. Send email notification to HR (we ignore/send but don't expose this status in API response)
+    # Delete draft
+    crud.delete_draft(db, draft.email)
+
+    # Send email
     email_subject = f"Leave Application Logged: {employee.name}"
     email_body = (
         f"Name: {employee.name}\n"
@@ -121,21 +118,13 @@ def apply_leave(request: schemas.LeaveRequest, db: Session = Depends(get_db)):
         f"Description: {leave.description}\n"
         f"Leaves Left (before approval): {leaves_left_before}\n"
     )
-    # Fire-and-forget-like: capture result but do not return it in response_model
     try:
         _ = send_leave_email(HR_EMAIL, email_subject, email_body)
     except Exception:
-        # swallow; don't fail the API because email failed
         pass
 
-    # 6. Return response with leaves_left BEFORE the current request (requested days not deducted)
-    return schemas.LeaveResponse(
-        name=employee.name,
-        email=employee.email,
-        start_date=leave.start_date,
-        end_date=leave.end_date,
-        days=leave.days,
-        description=leave.description,
-        leaves_left=leaves_left_before,   # <-- important: not leaves_left_before - leave.days
-        status="logged"
-    )
+    return {
+        "status": "submitted",
+        "message": "Leave application finalized and submitted",
+        "leaves_left": leaves_left_before,
+    }

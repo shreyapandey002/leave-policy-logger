@@ -23,3 +23,18 @@ class LeaveApplication(Base):
     description = Column(Text)
 
     employee = relationship("Employee", back_populates="leave_applications")
+
+
+class LeaveDraft(Base):
+    """
+    Temporary holding area for incomplete leave requests.
+    One draft per user (email).
+    """
+    __tablename__ = "leave_drafts"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(Text, nullable=True)
+    email = Column(Text, unique=True, index=True)   # one draft per user
+    start_date = Column(TIMESTAMP, nullable=True)
+    end_date = Column(TIMESTAMP, nullable=True)
+    days = Column(Integer, nullable=True)
+    description = Column(Text, nullable=True)
