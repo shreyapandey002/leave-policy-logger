@@ -46,7 +46,10 @@ def send_leave_email(to_email: str, subject: str, body: str):
 def parse_freeform_input(text: str):
     """
     Parse freeform user input into structured leave data.
-    Example: "rahul, rahulharlalka96@gmail.com, 25-10-2025 to 27-10-2025, 3 days, personal trip"
+    Example inputs:
+        "Shreya, shreya2002pandey@gmail.com"
+        "shreya, shreya2002pandey@gmail.com, 1"
+        "Rahul, rahul@example.com, 25-10-2025 to 27-10-2025, 3 days, personal trip"
     """
     result = {
         "name": None,
@@ -57,37 +60,46 @@ def parse_freeform_input(text: str):
         "description": None
     }
     
-    # Extract email
+    # Extract email first
     email_match = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text)
     if email_match:
         result["email"] = email_match.group()
+        parts = text.split(result["email"])
+        # Name = text before email
+        result["name"] = parts[0].replace(",", "").strip() if parts[0] else None
+        # Check if text after email is numeric (days) or description
+        after_email = parts[1].replace(",", "").strip() if len(parts) > 1 else None
+        if after_email:
+            if after_email.isdigit():
+                result["days"] = int(after_email)
+            else:
+                result["description"] = after_email
+    else:
+        # Fallback parsing
+        parts = text.split(",")
+        if parts:
+            result["name"] = parts[0].strip()
+            if len(parts) > 1:
+                # If numeric, treat as days, else description
+                second_part = parts[1].strip()
+                result["days"] = int(second_part) if second_part.isdigit() else None
+                result["description"] = second_part if not second_part.isdigit() else None
 
-    # Extract dates
+    # Extract dates (dd-mm-yyyy)
     date_matches = re.findall(r"\d{2}-\d{2}-\d{4}", text)
     if date_matches:
         try:
             result["start_date"] = datetime.strptime(date_matches[0], "%d-%m-%Y")
-            if len(date_matches) > 1:
-                result["end_date"] = datetime.strptime(date_matches[1], "%d-%m-%Y")
-            else:
-                result["end_date"] = result["start_date"]
+            result["end_date"] = datetime.strptime(date_matches[1], "%d-%m-%Y") if len(date_matches) > 1 else result["start_date"]
         except Exception:
             pass
 
-    # Extract days if provided
+    # Extract days if explicitly mentioned as "3 days"
     days_match = re.search(r"(\d+)\s*days?", text)
     if days_match:
         result["days"] = int(days_match.group(1))
     elif result["start_date"] and result["end_date"]:
         result["days"] = (result["end_date"] - result["start_date"]).days + 1
-
-    # Name (assume first part before first comma)
-    parts = text.split(",")
-    if parts:
-        result["name"] = parts[0].strip()
-    # Description (last part)
-    if len(parts) > 1:
-        result["description"] = parts[-1].strip()
 
     return result
 
