@@ -4,7 +4,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-from datetime import datetime
+from datetime import datetime, date
 import re
 
 from .db import SessionLocal, engine
@@ -103,16 +103,30 @@ def parse_freeform_input(text: str):
 
     return result
 
+def safe_to_dict(draft):
+    """Convert SQLAlchemy draft object into JSON-serializable dict."""
+    fields = ["name", "email", "start_date", "end_date", "days", "description"]
+    result = {}
+    for f in fields:
+        val = getattr(draft, f)
+        if isinstance(val, (datetime, date)):
+            result[f] = val.isoformat()
+        else:
+            result[f] = val
+    return result
+
 @app.post("/leaves")
 def apply_leave(request: schemas.LeaveDraft, db: Session = Depends(get_db)):
-    # Use freeform parsing if provided
+    # --- Step 1: Parse input (structured or freeform) ---
     if getattr(request, "freeform", None):
         parsed = parse_freeform_input(request.freeform)
     else:
         parsed = request.dict()
 
+    # --- Step 2: Save/update draft ---
     draft = crud.upsert_draft(db, parsed)
 
+    # --- Step 3: Check missing fields ---
     required_fields = ["name", "email", "start_date", "end_date", "days", "description"]
     missing = [f for f in required_fields if getattr(draft, f) is None]
 
@@ -120,9 +134,10 @@ def apply_leave(request: schemas.LeaveDraft, db: Session = Depends(get_db)):
         return {
             "status": "drafting",
             "message": f"Waiting for: {missing}",
-            "current_draft": {f: getattr(draft, f) for f in required_fields},
+            "current_draft": safe_to_dict(draft),
         }
 
+    # --- Step 4: Ensure employee exists ---
     employee = db.query(models.Employee).filter(models.Employee.email == draft.email).first()
     if not employee:
         employee = models.Employee(name=draft.name, email=draft.email)
@@ -130,8 +145,8 @@ def apply_leave(request: schemas.LeaveDraft, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(employee)
 
+    # --- Step 5: Check leave balance ---
     leaves_left_before = crud.calculate_leaves_left(db, employee.id, employee.total_leaves)
-
     if draft.days > leaves_left_before:
         return {
             "status": "rejected",
@@ -139,6 +154,7 @@ def apply_leave(request: schemas.LeaveDraft, db: Session = Depends(get_db)):
             "leaves_left": leaves_left_before,
         }
 
+    # --- Step 6: Finalize leave ---
     leave = crud.apply_leave(
         db=db,
         employee_id=employee.id,
@@ -150,22 +166,23 @@ def apply_leave(request: schemas.LeaveDraft, db: Session = Depends(get_db)):
 
     crud.delete_draft(db, draft.email)
 
+    # --- Step 7: Notify HR ---
     email_subject = f"Leave Application Logged: {employee.name}"
     email_body = (
         f"Name: {employee.name}\n"
         f"Email: {employee.email}\n"
-        f"Start Date: {leave.start_date.date()}\n"
-        f"End Date: {leave.end_date.date()}\n"
+        f"Start Date: {leave.start_date}\n"
+        f"End Date: {leave.end_date}\n"
         f"Days: {leave.days}\n"
         f"Description: {leave.description}\n"
         f"Leaves Left (before approval): {leaves_left_before}\n"
     )
-
     try:
         _ = send_leave_email(HR_EMAIL, email_subject, email_body)
     except Exception:
         pass
 
+    # --- Step 8: Return final response ---
     return {
         "status": "submitted",
         "message": "Leave application finalized and submitted",
