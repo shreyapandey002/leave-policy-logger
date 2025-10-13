@@ -78,43 +78,33 @@ def update_leave(
 
 # ---------------- Submit leave ----------------
 @app.post("/leaves/submit")
-def submit_leave(email: str = Form(...), db: Session = Depends(get_db)):
-    folder = os.path.join(UPLOAD_DIR, email)
-    draft_file = os.path.join(folder, "draft.json")
-    if not os.path.exists(draft_file):
-        return {"status": "error", "message": "Draft not initialized"}
+def submit_leave(email: str, db: Session = Depends(get_db)):
+    """
+    Submit the leave draft for the given email.
+    Creates/updates the employee's leave record and deletes the draft.
+    """
+    # Get the draft from DB
+    draft = db.query(models.LeaveDraft).filter(models.LeaveDraft.email == email).first()
+    if not draft:
+        raise HTTPException(status_code=404, detail="No leave draft found for this email")
 
-    import json
-    with open(draft_file, "r") as f:
-        draft = json.load(f)
+    # Create or get employee
+    employee = crud.get_or_create_employee(db, email=draft.email, name=draft.name)
 
-    required = ["name", "start_date", "end_date", "days", "description"]
-    missing = [f for f in required if f not in draft or draft[f] is None]
-    if missing:
-        return {"status": "drafting", "message": "Missing fields: " + ", ".join(missing)}
+    # Compute remaining leaves
+    total_leaves = 20  # example: max leaves per year
+    remaining = total_leaves - draft.days if draft.days else total_leaves
 
-    # Convert dates
-    for key in ["start_date", "end_date"]:
-        if "T" in draft[key]:
-            draft[key] = datetime.fromisoformat(draft[key])
-        else:
-            draft[key] = datetime.strptime(draft[key], "%d-%m-%Y")
-
-    employee = crud.get_or_create_employee(db, email=draft["email"], name=draft["name"])
-    leaves_left = crud.calculate_leaves_left(db, employee.id)
-
-    if draft["days"] > leaves_left:
-        return {"status": "rejected", "message": "Not enough leave balance", "leaves_left": leaves_left}
-
-    crud.apply_leave(db, employee.id, draft["start_date"], draft["end_date"], draft["days"], draft["description"])
+    # Update employee leaves left
+    employee.leaves_left = remaining
+    db.commit()
 
     # Delete draft
-    shutil.rmtree(folder)
-
-    leaves_left_after = crud.calculate_leaves_left(db, employee.id)
+    db.delete(draft)
+    db.commit()
 
     return {
-        "status": "submitted",
-        "message": "Leave application finalized and submitted",
-        "leaves_left": leaves_left_after
+        "status": "success",
+        "message": f"Leave submitted for {employee.name}",
+        "leaves_left": employee.leaves_left
     }
