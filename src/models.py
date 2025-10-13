@@ -7,8 +7,7 @@ class Employee(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(Text, unique=True, nullable=False)
     name = Column(Text, nullable=False)
-    total_leaves = Column(Integer, nullable=False, default=22)
-    connected_account_id = Column(Text, nullable=True)
+    total_leaves = Column(Integer, default=22, nullable=False)
 
     leave_applications = relationship("LeaveApplication", back_populates="employee")
 
@@ -20,21 +19,6 @@ class LeaveApplication(Base):
     start_date = Column(TIMESTAMP, nullable=False)
     end_date = Column(TIMESTAMP, nullable=False)
     days = Column(Integer, nullable=False)
-    description = Column(Text)
+    description = Column(Text, nullable=False)
 
     employee = relationship("Employee", back_populates="leave_applications")
-
-
-class LeaveDraft(Base):
-    """
-    Temporary holding area for incomplete leave requests.
-    One draft per user (email).
-    """
-    __tablename__ = "leave_drafts"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(Text, nullable=True)
-    email = Column(Text, unique=True, index=True)   # one draft per user
-    start_date = Column(TIMESTAMP, nullable=True)
-    end_date = Column(TIMESTAMP, nullable=True)
-    days = Column(Integer, nullable=True)
-    description = Column(Text, nullable=True)

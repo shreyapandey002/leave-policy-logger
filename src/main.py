@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from sqlalchemy.orm import Session
-from datetime import datetime, date
-from typing import Optional, List
+from datetime import datetime
+from typing import Optional, Dict, Any
 import os
 import smtplib
 from email.mime.text import MIMEText
@@ -19,6 +19,9 @@ MAILTRAP_PORT = int(os.getenv("MAILTRAP_PORT", 587))
 MAILTRAP_USER = os.getenv("MAILTRAP_USER")
 MAILTRAP_PASS = os.getenv("MAILTRAP_PASS")
 HR_EMAIL = os.getenv("HR_EMAIL", "hr@example.com")
+
+# --- In-memory draft store (like onboarding agent)
+draft_store: Dict[str, Dict[str, Any]] = {}
 
 def get_db():
     db = SessionLocal()
@@ -47,24 +50,17 @@ def send_leave_email(to_email: str, subject: str, body: str):
 # 1️⃣ INIT DRAFT
 # ----------------------
 @app.post("/leaves/init")
-def init_leave(email: str, db: Session = Depends(get_db)):
-    draft = db.query(models.LeaveDraft).filter(models.LeaveDraft.email == email).first()
-    if not draft:
-        draft = models.LeaveDraft(email=email)
-        db.add(draft)
-        db.commit()
-        db.refresh(draft)
-    return {
-        "status": "drafting",
-        "current_draft": {
-            "email": draft.email,
-            "name": draft.name,
-            "start_date": draft.start_date,
-            "end_date": draft.end_date,
-            "days": draft.days,
-            "description": draft.description
+def init_leave(email: str):
+    if email not in draft_store:
+        draft_store[email] = {
+            "email": email,
+            "name": None,
+            "start_date": None,
+            "end_date": None,
+            "days": None,
+            "description": None
         }
-    }
+    return {"status": "drafting", "current_draft": draft_store[email]}
 
 # ----------------------
 # 2️⃣ UPDATE DRAFT
@@ -76,119 +72,61 @@ def update_leave(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     days: Optional[int] = None,
-    description: Optional[str] = None,
-    db: Session = Depends(get_db)
+    description: Optional[str] = None
 ):
-    draft = db.query(models.LeaveDraft).filter(models.LeaveDraft.email == email).first()
-    if not draft:
+    if email not in draft_store:
         raise HTTPException(status_code=404, detail="Draft not found. Call /init first.")
 
-    if name:
-        draft.name = name
-    if start_date:
-        draft.start_date = datetime.fromisoformat(start_date) if 'T' in start_date else datetime.strptime(start_date, "%d-%m-%Y")
-    if end_date:
-        draft.end_date = datetime.fromisoformat(end_date) if 'T' in end_date else datetime.strptime(end_date, "%d-%m-%Y")
-    if days is not None:
-        draft.days = days
-    if description:
-        draft.description = description
+    draft = draft_store[email]
+    if name: draft["name"] = name
+    if start_date: draft["start_date"] = datetime.strptime(start_date, "%d-%m-%Y")
+    if end_date: draft["end_date"] = datetime.strptime(end_date, "%d-%m-%Y")
+    if days is not None: draft["days"] = days
+    if description: draft["description"] = description
 
-    db.commit()
-    db.refresh(draft)
-
-    required_fields = ["name", "start_date", "end_date", "days", "description"]
-    missing = [f for f in required_fields if getattr(draft, f) is None]
-
-    if missing:
-        return {
-            "status": "drafting",
-            "message": f"Waiting for: {missing}",
-            "current_draft": {
-                "email": draft.email,
-                "name": draft.name,
-                "start_date": draft.start_date,
-                "end_date": draft.end_date,
-                "days": draft.days,
-                "description": draft.description
-            }
-        }
-    else:
-        return {
-            "status": "ready",
-            "message": "All fields filled. Call /submit to finalize leave.",
-            "current_draft": {
-                "email": draft.email,
-                "name": draft.name,
-                "start_date": draft.start_date,
-                "end_date": draft.end_date,
-                "days": draft.days,
-                "description": draft.description
-            }
-        }
+    missing = [k for k, v in draft.items() if v is None and k != "email"]
+    status = "drafting" if missing else "ready"
+    return {"status": status, "missing_fields": missing, "current_draft": draft}
 
 # ----------------------
 # 3️⃣ SUBMIT LEAVE
 # ----------------------
 @app.post("/leaves/submit")
 def submit_leave(email: str, db: Session = Depends(get_db)):
-    draft = db.query(models.LeaveDraft).filter(models.LeaveDraft.email == email).first()
-    if not draft:
+    if email not in draft_store:
         raise HTTPException(status_code=404, detail="Draft not found. Call /init first.")
 
-    # Check required fields
-    required_fields = ["name", "start_date", "end_date", "days", "description"]
-    missing = [f for f in required_fields if getattr(draft, f) is None]
+    draft = draft_store[email]
+    missing = [k for k, v in draft.items() if v is None and k != "email"]
     if missing:
-        return {"status": "drafting", "message": f"Missing fields: {missing}"}
+        return {"status": "drafting", "missing_fields": missing}
 
-    # Ensure employee exists
-    employee = db.query(models.Employee).filter(models.Employee.email == draft.email).first()
-    if not employee:
-        employee = models.Employee(name=draft.name, email=draft.email)
-        db.add(employee)
-        db.commit()
-        db.refresh(employee)
+    employee = crud.get_or_create_employee(db, email=draft["email"], name=draft["name"])
+    leaves_left = crud.calculate_leaves_left(db, employee.id, employee.total_leaves)
 
-    # Check leave balance
-    leaves_left_before = crud.calculate_leaves_left(db, employee.id, employee.total_leaves)
-    if draft.days > leaves_left_before:
-        return {
-            "status": "rejected",
-            "message": "Not enough leave balance",
-            "leaves_left": leaves_left_before
-        }
+    if draft["days"] > leaves_left:
+        return {"status": "rejected", "message": "Not enough leave balance", "leaves_left": leaves_left}
 
-    # Apply leave
     leave = crud.apply_leave(
         db=db,
         employee_id=employee.id,
-        start_date=draft.start_date,
-        end_date=draft.end_date,
-        days=draft.days,
-        description=draft.description
+        start_date=draft["start_date"],
+        end_date=draft["end_date"],
+        days=draft["days"],
+        description=draft["description"]
     )
-
-    crud.delete_draft(db, draft.email)
 
     # Notify HR
-    subject = f"Leave Application: {employee.name}"
     body = (
-        f"Name: {employee.name}\n"
-        f"Email: {employee.email}\n"
-        f"Start Date: {leave.start_date}\n"
-        f"End Date: {leave.end_date}\n"
-        f"Days: {leave.days}\n"
-        f"Description: {leave.description}\n"
-        f"Leaves Left (before approval): {leaves_left_before}\n"
+        f"Name: {employee.name}\nEmail: {employee.email}\n"
+        f"Start: {leave.start_date}\nEnd: {leave.end_date}\n"
+        f"Days: {leave.days}\nReason: {leave.description}\n"
+        f"Leaves left before approval: {leaves_left}"
     )
-    try:
-        _ = send_leave_email(HR_EMAIL, subject, body)
-    except Exception:
-        pass
+    try: send_leave_email(HR_EMAIL, f"Leave Application - {employee.name}", body)
+    except: pass
 
-    return {
-        "status": "submitted",
-        "message": "Leave application finalized and submitted",
-        "leaves_left": leaves_left_before
-    }
+    # Remove draft
+    del draft_store[email]
+
+    return {"status": "submitted", "leaves_left": leaves_left, "leave_details": leave.__dict__}
