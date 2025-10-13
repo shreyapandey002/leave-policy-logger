@@ -41,34 +41,55 @@ def update_leave(
     name: str = Form(None),
     start_date: str = Form(None),
     end_date: str = Form(None),
-    days: int = Form(None),
+    days: str = Form(None),
     description: str = Form(None),
 ):
     folder = os.path.join(UPLOAD_DIR, email)
     draft_file = os.path.join(folder, "draft.json")
     if not os.path.exists(draft_file):
-        return {"status": "error", "message": "Draft not initialized. Call /init first."}
+        raise HTTPException(status_code=404, detail="Draft not initialized. Call /leaves/init first.")
 
     import json
     with open(draft_file, "r") as f:
         draft = json.load(f)
 
+    # Update fields if provided
     if name:
         draft["name"] = name
+
     if start_date:
-        draft["start_date"] = start_date
+        try:
+            datetime.strptime(start_date, "%Y-%m-%d")  # validate format
+            draft["start_date"] = start_date
+        except ValueError:
+            return {"status": "error", "message": "start_date must be YYYY-MM-DD"}
+
     if end_date:
-        draft["end_date"] = end_date
+        try:
+            datetime.strptime(end_date, "%Y-%m-%d")
+            draft["end_date"] = end_date
+        except ValueError:
+            return {"status": "error", "message": "end_date must be YYYY-MM-DD"}
+
     if days is not None:
-        draft["days"] = days
+        try:
+            days_int = int(days)
+            if days_int < 0:
+                raise ValueError
+            draft["days"] = days_int
+        except ValueError:
+            return {"status": "error", "message": "days must be a non-negative integer"}
+
     if description:
         draft["description"] = description
 
+    # Save draft back to file
     with open(draft_file, "w") as f:
         json.dump(draft, f)
 
+    # Check missing fields
     required = ["name", "start_date", "end_date", "days", "description"]
-    missing = [f for f in required if f not in draft or draft[f] is None]
+    missing = [f for f in required if f not in draft or draft[f] in (None, "")]
 
     return {
         "status": "drafting" if missing else "ready",
@@ -78,30 +99,41 @@ def update_leave(
 
 # ---------------- Submit leave ----------------
 @app.post("/leaves/submit")
-def submit_leave(email: str, db: Session = Depends(get_db)):
+def submit_leave(email: str = Form(...), db: Session = Depends(get_db)):
     """
     Submit the leave draft for the given email.
-    Creates/updates the employee's leave record and deletes the draft.
+    Creates/updates the employee's leave record and deletes the draft file.
     """
-    # Get the draft from DB
-    draft = db.query(models.LeaveDraft).filter(models.LeaveDraft.email == email).first()
-    if not draft:
-        raise HTTPException(status_code=404, detail="No leave draft found for this email")
+    folder = os.path.join(UPLOAD_DIR, email)
+    draft_file = os.path.join(folder, "draft.json")
+
+    if not os.path.exists(draft_file):
+        raise HTTPException(status_code=404, detail="No leave draft found. Call /leaves/init first.")
+
+    # Read draft from JSON
+    import json
+    with open(draft_file, "r") as f:
+        draft = json.load(f)
+
+    # Make sure all fields are present
+    required = ["name", "start_date", "end_date", "days", "description"]
+    missing = [f for f in required if f not in draft or draft[f] in (None, "")]
+    if missing:
+        return {"status": "error", "message": "Cannot submit. Missing fields: " + ", ".join(missing)}
 
     # Create or get employee
-    employee = crud.get_or_create_employee(db, email=draft.email, name=draft.name)
+    employee = crud.get_or_create_employee(db, email=email, name=draft["name"])
 
     # Compute remaining leaves
-    total_leaves = 20  # example: max leaves per year
-    remaining = total_leaves - draft.days if draft.days else total_leaves
+    total_leaves = 20  # example max leaves per year
+    remaining = total_leaves - draft["days"]
 
     # Update employee leaves left
     employee.leaves_left = remaining
     db.commit()
 
-    # Delete draft
-    db.delete(draft)
-    db.commit()
+    # Delete draft file
+    os.remove(draft_file)
 
     return {
         "status": "success",
