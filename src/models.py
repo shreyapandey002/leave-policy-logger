@@ -6,8 +6,8 @@ class Employee(Base):
     __tablename__ = "employees"
     id = Column(Integer, primary_key=True, index=True)
     email = Column(Text, unique=True, nullable=False)
-    name = Column(Text, nullable=False)
-    total_leaves = Column(Integer, default=22, nullable=False)
+    name = Column(Text, nullable=True)
+    total_leaves = Column(Integer, nullable=False, default=22)
 
     leave_applications = relationship("LeaveApplication", back_populates="employee")
 
@@ -19,6 +19,6 @@ class LeaveApplication(Base):
     start_date = Column(TIMESTAMP, nullable=False)
     end_date = Column(TIMESTAMP, nullable=False)
     days = Column(Integer, nullable=False)
-    description = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
 
     employee = relationship("Employee", back_populates="leave_applications")
