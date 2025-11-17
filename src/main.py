@@ -56,7 +56,7 @@ Leave Management System
     payload = {
         "connected_account_id": GMAIL_CONNECTED_ACCOUNT_ID,
         "arguments": {
-            "recipient_email": f"{hr_email},{user_email}",
+            "recipient_email": f"{hr_email}",
             "subject": subject,
             "body": body,
             "is_html": False
